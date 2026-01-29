@@ -1,0 +1,51 @@
+# Environment
+.env
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data
+data/*
+!data/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Streamlit cache
+.streamlit/
+
+# MySQL dumps only (keep db/schema.sql tracked)
+*.dump
+*.bak.sql
+*.sql.gz
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Coverage / tests
+.coverage
+htmlcov/
+.pytest_cache/

@@ -1,0 +1,9 @@
+requests
+pandas
+SQLAlchemy
+PyMySQL
+python-dotenv
+streamlit
+scikit-learn
+numpy
+backoff
