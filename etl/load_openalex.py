@@ -47,19 +47,23 @@ def extract_source_info(work):
     return None, None
 
 
-def load_works_and_sources(query_text, per_page=None, max_pages=None):
+def load_works_and_sources(query_text, per_page=None, max_pages=None, search_mode="title_abstract", top_sources_limit=None):
     """
     Pipeline completo: descarga works, extrae sources, upsert a MySQL.
+    Incluye fallback automático de title_abstract a fulltext si 0 resultados.
     
     Args:
         query_text (str): Texto de búsqueda para OpenAlex
         per_page (int, optional): Works por página
         max_pages (int, optional): Páginas máximas a descargar
+        search_mode (str, optional): "title_abstract" (preciso, default) o "fulltext" (amplio)
+        top_sources_limit (int, optional): Número máximo de sources a enriquecer con llamadas API (default: config.TOP_SOURCES_LIMIT)
         
     Returns:
-        tuple: (df_candidates, df_works)
+        tuple: (df_candidates, df_works, did_fallback)
             - df_candidates: DataFrame con candidatos (source_id, freq, display_name)
             - df_works: DataFrame con works (work_id, title, publication_year, cited_by_count, source_name, openalex_url)
+            - did_fallback: bool indicando si se hizo fallback automático a fulltext
         
     Raises:
         Exception: Si falla algún paso del pipeline
@@ -73,17 +77,20 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
     # Configuración
     per_page = per_page or config.DEFAULT_PER_PAGE
     max_pages = max_pages or config.DEFAULT_MAX_PAGES
+    top_sources_limit = top_sources_limit or config.TOP_SOURCES_LIMIT
     
     # Paso 1: Descargar works desde OpenAlex
     print("PASO 1: Descargando works desde OpenAlex...")
     print("-" * 70)
     try:
-        works = search_works_by_text(query_text, per_page, max_pages)
+        # search_works_by_text ahora retorna tupla (works, did_fallback)
+        works, did_fallback = search_works_by_text(query_text, per_page, max_pages, search_mode)
+        
         if not works:
             print("⚠️  No se encontraron works para esta query")
             df_candidates_empty = pd.DataFrame(columns=['source_id', 'freq', 'display_name'])
             df_works_empty = pd.DataFrame(columns=['work_id', 'title', 'publication_year', 'cited_by_count', 'source_name', 'type', 'openalex_url'])
-            return df_candidates_empty, df_works_empty
+            return df_candidates_empty, df_works_empty, did_fallback
     except Exception as e:
         print(f"❌ Error al descargar works: {e}")
         raise
@@ -107,14 +114,19 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
     print(f"   Top 3: {source_counts.most_common(3)}")
     print()
     
-    # Paso 3: Upsert sources a MySQL
+    # Paso 3: Upsert sources a MySQL (solo top sources)
     print("PASO 3: Actualizando tabla 'sources' en MySQL...")
     print("-" * 70)
     engine = get_engine()
     sources_updated = 0
     source_display_name_map = {}
     
-    for source_id in source_counts.keys():
+    # Ordenar sources por frecuencia descendente y tomar solo top N
+    top_sources = source_counts.most_common(top_sources_limit)
+    print(f"  Enriqueciendo solo los top {len(top_sources)} sources por frecuencia (de {len(source_counts)} totales)")
+    print(f"  Esto acelera el proceso evitando llamadas API innecesarias.\n")
+    
+    for source_id, freq in top_sources:
         try:
             # Obtener info completa de OpenAlex
             source_data = get_source(source_id)
@@ -218,7 +230,13 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
             else:
                 print(f"  ⚠️  source_data es None para {source_id}, no se puede actualizar")
     
-    print(f"✅ {sources_updated} sources actualizados/insertados")
+    # Para sources no enriquecidos, usar display_name de source_names_map
+    for source_id in source_counts.keys():
+        if source_id not in source_display_name_map:
+            source_display_name_map[source_id] = source_names_map.get(source_id, '') or source_id
+    
+    print(f"✅ {sources_updated} sources enriquecidos con llamadas API completas")
+    print(f"   {len(source_counts) - sources_updated} sources adicionales usan display_name básico")
     print()
     
     # Paso 4: Insertar works_sample y preparar DataFrame de works
@@ -233,6 +251,7 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
         source_id, source_name = extract_source_info(work)
         work_id = work.get('id', '').split('/')[-1]
         
+        # work_row para DB (sin relevance_score)
         work_row = {
             'work_id': work_id,
             'title': (work.get('title') or '')[:1000],  # Limitar título
@@ -241,7 +260,8 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
             'source_id': source_id,
             'source_name': source_name[:500] if source_name else None,
             'type': work.get('type'),  # Añadir tipo de trabajo
-            'openalex_url': f"https://openalex.org/{work_id}" if work_id else None
+            'openalex_url': f"https://openalex.org/{work_id}" if work_id else None,
+            'relevance_score': work.get('relevance_score')  # Mantener para df_works (display)
         }
         works_data.append(work_row)
     
@@ -250,8 +270,8 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
         # Eliminar duplicados por work_id
         df_works = df_works.drop_duplicates(subset=['work_id'])
         
-        # Insertar (ignorar duplicados)
-        df_works_insert = df_works.drop(columns=['openalex_url'])  # No guardar URL en BD
+        # Insertar en DB (sin 'openalex_url' ni 'relevance_score')
+        df_works_insert = df_works.drop(columns=['openalex_url', 'relevance_score'])
         df_works_insert.to_sql(
             'works_sample',
             engine,
@@ -283,18 +303,59 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
     df_candidates = pd.DataFrame(candidates)
     df_candidates = df_candidates.sort_values('freq', ascending=False)
     
-    # Preparar DataFrame de works top
-    # Ordenar por: 1) Citas (desc), 2) Año de publicación (desc)
-    df_works_top = df_works.sort_values(
-        ['cited_by_count', 'publication_year'],
-        ascending=[False, False]
-    ).copy()
+    # Preparar DataFrame de works top con ordenamiento inteligente
+    df_works_top = df_works.copy()
     
-    # Seleccionar columnas finales
-    df_works_top = df_works_top[[
-        'work_id', 'title', 'publication_year', 'cited_by_count', 
-        'source_name', 'type', 'openalex_url'
-    ]]
+    # FILTRO EXTRA: Si hubo fallback a fulltext, preferir works de journals
+    if did_fallback:
+        print("  Aplicando filtro: preferir works de journals (fulltext mode)")
+        # Filtrar works que no tienen source_name o source_id
+        df_works_top = df_works_top[df_works_top['source_id'].notna()]
+        print(f"  → {len(df_works_top)} works con source válido")
+    
+    # ORDENAMIENTO INTELIGENTE POR RELEVANCIA
+    # Verificar si existe relevance_score y tiene valores
+    has_relevance = 'relevance_score' in df_works_top.columns and df_works_top['relevance_score'].notna().any()
+    
+    if has_relevance and did_fallback:
+        # MODO FULLTEXT: Score mixto 70% relevancia + 30% citas
+        print("  Ordenando por score mixto (70% relevancia + 30% citas)")
+        
+        # Normalizar relevance_score y cited_by_count
+        max_rel = df_works_top['relevance_score'].max()
+        max_cites = df_works_top['cited_by_count'].max()
+        
+        df_works_top['rel_norm'] = df_works_top['relevance_score'] / max_rel if max_rel > 0 else 0
+        df_works_top['cites_norm'] = df_works_top['cited_by_count'] / max_cites if max_cites > 0 else 0
+        
+        # Score mixto
+        df_works_top['work_score'] = 0.7 * df_works_top['rel_norm'].fillna(0) + 0.3 * df_works_top['cites_norm'].fillna(0)
+        
+        # Ordenar por work_score DESC
+        df_works_top = df_works_top.sort_values('work_score', ascending=False)
+        
+    elif has_relevance:
+        # MODO PRECISO: Ordenar por relevance_score (primario) y cited_by_count (desempate)
+        print("  Ordenando por relevance_score (primario) + cited_by_count (desempate)")
+        df_works_top = df_works_top.sort_values(
+            ['relevance_score', 'cited_by_count'],
+            ascending=[False, False],
+            na_position='last'
+        )
+    else:
+        # FALLBACK: Si no hay relevance_score, ordenar solo por citas
+        print("  Ordenando por cited_by_count (fallback)")
+        df_works_top = df_works_top.sort_values(
+            ['cited_by_count', 'publication_year'],
+            ascending=[False, False]
+        )
+    
+    # Seleccionar columnas finales (incluyendo relevance_score si existe)
+    base_columns = ['work_id', 'title', 'publication_year', 'cited_by_count', 'source_name', 'type', 'openalex_url']
+    if has_relevance:
+        base_columns.insert(4, 'relevance_score')  # Insertar después de publication_year
+    
+    df_works_top = df_works_top[base_columns]
     
     print(f"✅ {len(df_candidates)} candidatos generados")
     print(f"✅ {len(df_works_top)} works disponibles")
@@ -303,7 +364,7 @@ def load_works_and_sources(query_text, per_page=None, max_pages=None):
     print("PIPELINE COMPLETADO")
     print("=" * 70)
     
-    return df_candidates, df_works_top
+    return df_candidates, df_works_top, did_fallback
 
 
 if __name__ == "__main__":

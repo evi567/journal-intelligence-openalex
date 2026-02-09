@@ -51,11 +51,97 @@ class OpenAlexClient:
         Raises:
             requests.exceptions.HTTPError: Si la request falla después de reintentos
         """
+        # DEBUG: Mostrar URL final antes de la request
+        req = requests.Request("GET", url, params=params).prepare()
+        print(f"🔗 DEBUG OpenAlex URL: {req.url}")
+        
         response = self.session.get(url, params=params, timeout=30)
         response.raise_for_status()
         return response.json()
     
-    def search_works_by_text(self, query_text, per_page=200, max_pages=2):
+    def _build_fulltext_query(self, query_text):
+        """
+        Construye una query booleana optimizada para modo fulltext.
+        Detecta bigramas fuertes (ej: 'editorial board') y construye:
+        "bigrama fuerte" AND (token1 OR token2 OR ... OR token5)
+        
+        Args:
+            query_text (str): Query original con tokens separados por espacios
+            
+        Returns:
+            str: Query booleana optimizada
+        """
+        # Tokenizar
+        tokens = [t.strip() for t in query_text.split() if t.strip()]
+        
+        if len(tokens) < 2:
+            return query_text  # Muy corta, devolver tal cual
+        
+        # Detectar bigramas fuertes conocidos (frases que deben ir juntas)
+        strong_bigrams = [
+            ('editorial', 'board'),
+            ('machine', 'learning'),
+            ('artificial', 'intelligence'),
+            ('climate', 'change'),
+            ('deep', 'learning'),
+            ('neural', 'network'),
+            ('systematic', 'review'),
+            ('meta', 'analysis'),
+            ('randomized', 'controlled'),
+            ('double', 'blind')
+        ]
+        
+        # Términos genéricos a filtrar del OR-group
+        generic_terms = {
+            'scholarly', 'journal', 'study', 'research', 'analysis', 
+            'paper', 'review', 'article', 'publication', 'science',
+            'scientific', 'academic', 'data', 'results', 'method',
+            'approach', 'using', 'based', 'new', 'model'
+        }
+        
+        # Buscar si hay un bigrama fuerte en los primeros tokens
+        anchor_phrase = None
+        rest_tokens = list(tokens)
+        
+        for i in range(len(tokens) - 1):
+            tok1_lower = tokens[i].lower()
+            tok2_lower = tokens[i + 1].lower()
+            
+            for bigram in strong_bigrams:
+                if tok1_lower == bigram[0] and tok2_lower == bigram[1]:
+                    anchor_phrase = f'{tokens[i]} {tokens[i + 1]}'
+                    # Remover el bigrama de rest_tokens
+                    rest_tokens = tokens[:i] + tokens[i+2:]
+                    break
+            
+            if anchor_phrase:
+                break
+        
+        # Si encontramos un bigrama fuerte, construir query booleana
+        if anchor_phrase and rest_tokens:
+            # Filtrar términos genéricos
+            filtered_tokens = [
+                tok for tok in rest_tokens 
+                if tok.lower() not in generic_terms
+            ]
+            
+            # Limitar a máximo 5 tokens
+            limited_tokens = filtered_tokens[:5]
+            
+            if limited_tokens:
+                boolean_query = f'"{anchor_phrase}" AND (' + ' OR '.join(limited_tokens) + ')'
+                print(f"  📋 OR keywords finales: {', '.join(limited_tokens)}")
+                print(f"  🔍 Search query final: {boolean_query}")
+                return boolean_query
+            else:
+                # Si después de filtrar no quedan tokens, usar solo el anchor
+                print(f"  ⚠️  Sin tokens válidos después de filtrar genéricos, usando solo anchor phrase")
+                return f'"{anchor_phrase}"'
+        
+        # Si no hay bigrama fuerte, devolver query normal
+        return query_text
+    
+    def search_works_by_text(self, query_text, per_page=200, max_pages=2, search_mode="title_abstract"):
         """
         Busca trabajos (works) en OpenAlex por texto.
         
@@ -63,9 +149,12 @@ class OpenAlexClient:
             query_text (str): Texto de búsqueda (título, abstract, etc.)
             per_page (int): Resultados por página (máx 200)
             max_pages (int): Número máximo de páginas a descargar
+            search_mode (str): "title_abstract" (preciso) o "fulltext" (amplio)
             
         Returns:
-            list: Lista de works (diccionarios)
+            tuple: (works, did_fallback)
+                - works: Lista de works (diccionarios)
+                - did_fallback: bool indicando si se hizo fallback de preciso a fulltext
             
         Raises:
             Exception: Si la búsqueda falla
@@ -73,40 +162,133 @@ class OpenAlexClient:
         try:
             url = f"{self.base_url}/works"
             all_works = []
+            did_fallback = False
             
-            for page in range(1, max_pages + 1):
-                params = {
-                    'search': query_text,
-                    'per-page': min(per_page, 200),  # OpenAlex máx 200
-                    'page': page,
-                    'mailto': self.email
-                }
+            # Estrategia de búsqueda
+            if search_mode == "title_abstract":
+                print(f"\n🔍 Modo PRECISO: title_and_abstract.search")
                 
-                print(f"  Descargando página {page}/{max_pages}...")
+                # Intento 1: Modo preciso
+                for page in range(1, max_pages + 1):
+                    params = {
+                        'filter': f'title_and_abstract.search:{query_text}',
+                        'sort': 'relevance_score:desc',
+                        'per_page': min(per_page, 200),
+                        'page': page
+                    }
+                    if self.email:
+                        params['mailto'] = self.email
+                    
+                    print(f"  Descargando página {page}/{max_pages}...")
+                    
+                    try:
+                        data = self._make_request(url, params)
+                        results = data.get('results', [])
+                        
+                        if not results:
+                            print(f"  No hay más resultados en página {page}")
+                            break
+                        
+                        all_works.extend(results)
+                        
+                        # Info de metadatos
+                        meta = data.get('meta', {})
+                        total_count = meta.get('count', 0)
+                        print(f"  → {len(results)} works descargados (total disponible: {total_count})")
+                        
+                    except requests.exceptions.HTTPError as e:
+                        if e.response.status_code == 429:
+                            print(f"  ⚠️  Rate limit alcanzado en página {page}. Deteniendo descarga.")
+                            break
+                        raise
                 
-                try:
-                    data = self._make_request(url, params)
-                    results = data.get('results', [])
+                # Si no hay resultados, hacer fallback a fulltext
+                if not all_works:
+                    print(f"\n⚠️  0 resultados con modo PRECISO. Activando fallback a FULLTEXT...")
+                    did_fallback = True
                     
-                    if not results:
-                        print(f"  No hay más resultados en página {page}")
-                        break
+                    # Construir query booleana optimizada para fulltext
+                    fulltext_query = self._build_fulltext_query(query_text)
+                    print(f"\n🔍 Fallback FULLTEXT query usada: {fulltext_query}")
                     
-                    all_works.extend(results)
+                    for page in range(1, max_pages + 1):
+                        params = {
+                            'search': fulltext_query,
+                            'sort': 'relevance_score:desc',
+                            'per_page': min(per_page, 200),
+                            'page': page
+                        }
+                        if self.email:
+                            params['mailto'] = self.email
+                        
+                        print(f"  Descargando página {page}/{max_pages}...")
+                        
+                        try:
+                            data = self._make_request(url, params)
+                            results = data.get('results', [])
+                            
+                            if not results:
+                                print(f"  No hay más resultados en página {page}")
+                                break
+                            
+                            all_works.extend(results)
+                            
+                            # Info de metadatos
+                            meta = data.get('meta', {})
+                            total_count = meta.get('count', 0)
+                            print(f"  → {len(results)} works descargados (total disponible: {total_count})")
+                            
+                        except requests.exceptions.HTTPError as e:
+                            if e.response.status_code == 429:
+                                print(f"  ⚠️  Rate limit alcanzado en página {page}. Deteniendo descarga.")
+                                break
+                            raise
+            else:
+                # Modo amplio directo
+                # Construir query booleana optimizada
+                fulltext_query = self._build_fulltext_query(query_text)
+                print(f"\n🔍 Modo AMPLIO: fulltext search")
+                print(f"  Query booleana: {fulltext_query}")
+                
+                for page in range(1, max_pages + 1):
+                    params = {
+                        'search': fulltext_query,
+                        'sort': 'relevance_score:desc',
+                        'per_page': min(per_page, 200),
+                        'page': page
+                    }
+                    if self.email:
+                        params['mailto'] = self.email
                     
-                    # Info de metadatos
-                    meta = data.get('meta', {})
-                    total_count = meta.get('count', 0)
-                    print(f"  → {len(results)} works descargados (total disponible: {total_count})")
+                    print(f"  Descargando página {page}/{max_pages}...")
                     
-                except requests.exceptions.HTTPError as e:
-                    if e.response.status_code == 429:
-                        print(f"  ⚠️  Rate limit alcanzado en página {page}. Deteniendo descarga.")
-                        break
-                    raise
+                    try:
+                        data = self._make_request(url, params)
+                        results = data.get('results', [])
+                        
+                        if not results:
+                            print(f"  No hay más resultados en página {page}")
+                            break
+                        
+                        all_works.extend(results)
+                        
+                        # Info de metadatos
+                        meta = data.get('meta', {})
+                        total_count = meta.get('count', 0)
+                        print(f"  → {len(results)} works descargados (total disponible: {total_count})")
+                        
+                    except requests.exceptions.HTTPError as e:
+                        if e.response.status_code == 429:
+                            print(f"  ⚠️  Rate limit alcanzado en página {page}. Deteniendo descarga.")
+                            break
+                        raise
             
-            print(f"✅ Total descargado: {len(all_works)} works")
-            return all_works
+            if all_works:
+                print(f"\n✅ Total descargado: {len(all_works)} works")
+            else:
+                print(f"\n⚠️  0 resultados en total")
+            
+            return all_works, did_fallback
             
         except Exception as e:
             print(f"❌ Error al buscar works en OpenAlex: {e}")
@@ -147,7 +329,7 @@ class OpenAlexClient:
 
 # Funciones de conveniencia para usar sin instanciar la clase
 
-def search_works_by_text(query_text, per_page=200, max_pages=2):
+def search_works_by_text(query_text, per_page=200, max_pages=2, search_mode="title_abstract"):
     """
     Busca trabajos en OpenAlex (función de conveniencia).
     
@@ -155,12 +337,15 @@ def search_works_by_text(query_text, per_page=200, max_pages=2):
         query_text (str): Texto de búsqueda
         per_page (int): Resultados por página
         max_pages (int): Páginas máximas a descargar
+        search_mode (str): "title_abstract" (preciso) o "fulltext" (amplio)
         
     Returns:
-        list: Lista de works
+        tuple: (works, did_fallback)
+            - works: Lista de works
+            - did_fallback: bool indicando si se hizo fallback a fulltext
     """
     client = OpenAlexClient()
-    return client.search_works_by_text(query_text, per_page, max_pages)
+    return client.search_works_by_text(query_text, per_page, max_pages, search_mode)
 
 
 def get_source(source_id):

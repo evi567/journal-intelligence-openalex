@@ -1,5 +1,5 @@
 # 📚 Journal Intelligence
-### *Sistema inteligente de recomendación de revistas científicas*
+### *Sistema inteligente de recomendación de revistas científicas basado en OpenAlex*
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-FF4B4B?logo=streamlit&logoColor=white)
@@ -9,95 +9,307 @@
 
 ---
 
-## 🎯 ¿Qué hace esta herramienta?
+## 🎯 ¿Qué es Journal Intelligence?
 
-**Journal Intelligence** te ayuda a tomar decisiones informadas sobre dónde publicar tu investigación y cómo enriquecer tu manuscrito. Ofrece **tres casos de uso principales**:
-
-### 1️⃣ **Recomendar revistas para publicar**
-- Ingresa el título y/o abstract de tu investigación
-- Obtén un ranking personalizado de revistas relevantes
-- Visualiza cuartiles SJR, frecuencia de aparición y métricas de impacto normalizado
-- Identifica las revistas más alineadas con tu temática
-
-### 2️⃣ **Recuperar artículos relacionados para discusión/estado del arte**
-- Encuentra automáticamente los artículos más citados y relevantes sobre tu tema
-- Filtra por tipo (artículos, preprints, reviews)
-- Accede directamente a OpenAlex para explorar cada trabajo
-- Enriquece tu sección de literatura relacionada con fuentes actuales
-
-### 3️⃣ **Buscar revistas similares a una de referencia**
-- Identifica revistas con perfil similar a una que ya conoces
-- Explora alternativas de publicación con métricas comparables
-- Descubre opciones de la misma categoría o nicho académico
-- Basado en similitud numérica (impacto, productividad, actividad reciente)
-
-**✨ Por defecto, los resultados se filtran a `type=journal`**, evitando repositorios, eBooks y preprints en las recomendaciones principales. Puedes incluirlos opcionalmente con un checkbox.
+**Journal Intelligence** es un sistema de recomendación inteligente que ayuda a investigadores a **decidir dónde publicar su trabajo** y **encontrar artículos relevantes** para enriquecer su investigación. Utiliza datos abiertos de OpenAlex, métricas de impacto (SJR) y algoritmos de ranking/similitud para ofrecer recomendaciones personalizadas basadas en el contenido de tu manuscrito o una revista de referencia.
 
 ---
 
-## 🚀 Demo Rápida (Quickstart)
+## ✨ Funcionalidades Clave
 
+### 🔍 **1. Búsqueda por Texto (Título + Abstract)**
+- **Modo Preciso**: Búsqueda en `title_and_abstract` de OpenAlex
+- **Fallback Automático**: Si 0 resultados, reintenta con `fulltext` usando query booleana optimizada
+- **Query Inteligente**: Extrae keywords/bigrams, filtra términos genéricos, limita a 15 tokens
+- **Ranking Personalizado**: Calcula score basado en frecuencia (75%), impacto (15%) y actividad reciente (10%)
+
+### 📰 **2. Búsqueda por Revista (ISSN/Título)**
+- Busca revistas similares a una de referencia
+- **Similitud Numérica**: Coseno sobre características normalizadas (impacto, productividad, citas)
+- **Similitud Temática** (opcional): Jaccard sobre topics de OpenAlex
+- Enriquecimiento con cuartiles SJR si disponible
+
+### 📄 **3. Top Artículos Relacionados**
+- Muestra artículos más relevantes al tema de búsqueda
+- **Ordenamiento Inteligente**:
+  - Modo preciso: Por `relevance_score` de OpenAlex
+  - Modo fulltext: Score mixto (70% relevancia + 30% citas)
+- Filtrado de tipos: solo artículos, preprints, reviews (excluye paratext/editorial)
+- Filtro por source type: journals por defecto (opción de incluir repos/ebooks)
+
+### 🏆 **4. Enriquecimiento SJR (SCImago Journal Rank)**
+- Integración con cuartiles Q1/Q2/Q3/Q4
+- Matching por ISSN normalizado
+- Visualización con código de colores
+
+---
+
+## 🏗️ Arquitectura del Sistema
+
+```
+┌─────────────────┐
+│   OpenAlex API  │  ← Búsqueda de works/sources (Polite Pool)
+└────────┬────────┘
+         │ JSON
+         ▼
+┌─────────────────┐
+│   ETL Pipeline  │  ← Extracción, normalización, frecuencias
+│  (openalex_     │     Query booleana, filtros, dedupe
+│   client.py,    │
+│   load_openalex)│
+└────────┬────────┘
+         │ DataFrames
+         ▼
+┌─────────────────┐
+│  MySQL Database │  ← Persistencia (sources, works_sample,
+│  (8.0+)         │     sjr_2024, queries, recommendations)
+└────────┬────────┘
+         │ SQL
+         ▼
+┌─────────────────┐
+│  ML Ranking &   │  ← Score: 0.75*freq + 0.15*impact + 0.05*works + 0.05*cites
+│  Similarity     │     Similitud: Coseno + Z-score (opcional Jaccard)
+│  (ranker.py,    │
+│   similarity.py)│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Streamlit UI   │  ← Interfaz interactiva (tabs, filtros, debug,
+│  (app.py)       │     wordcloud, cuartiles SJR)
+└─────────────────┘
+```
+
+### **Componentes Principales:**
+
+| Componente | Función |
+|------------|---------|
+| `etl/openalex_client.py` | Cliente API con retry, query booleana, fallback preciso→amplio |
+| `etl/load_openalex.py` | Pipeline ETL: works → sources → MySQL (optimizado top 30 sources) |
+| `ml/ranker.py` | Algoritmo de ranking con normalización Z-score |
+| `ml/similarity.py` | Cálculo de similitud numérica/temática entre journals |
+| `db/` | Esquema MySQL, init script, conexión SQLAlchemy |
+| `app/app.py` | UI Streamlit con 2 tabs, filtros, debug mode |
+
+---
+
+## 📊 Ranking Explicado
+
+El sistema calcula un **score compuesto** para cada revista candidata:
+
+```python
+score = 0.75 × freq_norm + 0.15 × two_yr_norm + 0.05 × works_ref_norm + 0.05 × cites_ref_norm
+```
+
+| Métrica | Peso | Descripción |
+|---------|------|-------------|
+| **Frecuencia** (`freq`) | **75%** | Veces que la revista aparece en resultados de OpenAlex para la query |
+| **Impacto** (`two_yr_mean_citedness`) | **15%** | Media de citas por trabajo en últimos 2 años |
+| **Trabajos (año ref)** (`works_ref_year`) | **5%** | Número de trabajos publicados hace 4 años (proxy actividad reciente) |
+| **Citas (año ref)** (`cites_ref_year`) | **5%** | Citas recibidas en año de referencia (proxy visibilidad) |
+
+> **Normalización**: Todas las métricas se normalizan a [0, 1] usando max-scaling antes de aplicar pesos.
+
+**Explicación generada**:
+```
+Aparece 12 veces en los resultados | 450 trabajos (año ref), 8,932 citas (año ref)
+```
+
+---
+
+## 🛠️ Instalación y Ejecución (Windows)
+
+### **Requisitos Previos**
+- Python 3.8+
+- MySQL 8.0+ (instalado y corriendo)
+- Git
+
+### **1. Clonar el Repositorio**
 ```bash
-# 1. Clonar el proyecto y crear entorno virtual
+git clone https://github.com/tu-usuario/journal-intelligence-openalex.git
+cd journal-intelligence-openalex
+```
+
+### **2. Crear Entorno Virtual**
+```bash
 python -m venv venv
-venv\Scripts\activate  # Windows | source venv/bin/activate en Linux/Mac
+venv\Scripts\activate
+```
 
-# 2. Instalar dependencias
+### **3. Instalar Dependencias**
+```bash
 pip install -r requirements.txt
+```
 
-# 3. Configurar variables de entorno
-copy .env.example .env
-# Edita .env con tus credenciales de MySQL
+### **4. Configurar Variables de Entorno**
+Crea un archivo `.env` en la raíz del proyecto:
+```env
+# MySQL
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_DB=journal_intelligence
+MYSQL_USER=root
+MYSQL_PASSWORD=tu_password_aqui
 
-# 4. Inicializar base de datos
+# OpenAlex (opcional pero recomendado para Polite Pool)
+OPENALEX_EMAIL=tu_email@ejemplo.com
+```
+
+### **5. Inicializar Base de Datos**
+```bash
 python db/init_db.py
+```
 
-# 5. Lanzar la aplicación
+Esto creará las tablas: `sources`, `works_sample`, `sjr_2024`, `queries`, `recommendations`.
+
+### **6. (Opcional) Cargar Datos SJR**
+Si tienes un CSV con cuartiles SJR, colócalo en `data/sjr_2024.csv` con columnas:
+- `issn_norm` (sin guiones)
+- `quartile` (Q1, Q2, Q3, Q4)
+- `sjr` (valor numérico)
+
+El sistema lo cargará automáticamente.
+
+### **7. Ejecutar la Aplicación**
+```bash
 streamlit run app/app.py
 ```
 
-Abre tu navegador en `http://localhost:8501` y comienza a explorar.
+Abre tu navegador en `http://localhost:8501` 🎉
 
 ---
 
-## 🔧 Cómo Funciona
+## 📸 Capturas de Pantalla
 
-El sistema sigue un pipeline de datos completo desde la API hasta la interfaz de usuario:
+<!-- Placeholder: Agrega tus capturas aquí -->
+![Búsqueda por texto](/assets/screenshot-text-search.png)
+*Búsqueda por título + abstract con ranking de revistas*
 
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│             │     │             │     │             │     │             │     │             │
-│  OpenAlex   │────▶│  ETL Layer  │────▶│    MySQL    │────▶│  Ranking &  │────▶│  Streamlit  │
-│   API       │     │  (Python)   │     │   Database  │     │  Similitud  │     │     UI      │
-│             │     │             │     │             │     │   (ML)      │     │             │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-      │                    │                    │                    │                    │
-   Polite Pool      Works + Sources      Persistencia       Score = 75/15/10        Tabs, tablas
-   (con email)      JSON → DataFrame      Normalización      Cosine similarity     Cuartiles SJR
-                    Enriquecimiento       ISSN matching      Z-score features      Filtros, debug
-```
+![Top artículos relacionados](/assets/screenshot-top-articles.png)
+*Top artículos ordenados por relevancia*
 
-### Pasos del pipeline:
-
-1. **OpenAlex API**: Consulta works relevantes según texto de búsqueda (usa Polite Pool con email)
-2. **ETL Layer**: Extrae sources, normaliza datos, calcula frecuencias
-3. **MySQL**: Almacena sources, works, queries, recommendations y cuartiles SJR
-4. **Ranking/Similitud**: Aplica algoritmo de scoring (75% freq + 15% impacto + 10% actividad) o similitud coseno
-5. **Streamlit UI**: Presenta resultados en tablas interactivas con filtros y detalles expandibles
+![Búsqueda por revista](/assets/screenshot-journal-search.png)
+*Búsqueda de revistas similares por ISSN*
 
 ---
 
-## 🔍 Modos de Búsqueda
+## ⚙️ Configuración Avanzada
 
-### **Modo 1: Búsqueda por Texto** 🔎
+### **Parámetros en `config.py`:**
+```python
+DEFAULT_PER_PAGE = 200        # Works por página de OpenAlex
+DEFAULT_MAX_PAGES = 2         # Páginas máximas a descargar
+TOP_SOURCES_LIMIT = 30        # Top sources a enriquecer con API (optimización)
+```
 
-**Input:**
-- Título de tu investigación (opcional)
-- Abstract o resumen (opcional, mínimo 50 caracteres si no hay título)
-- O consulta libre con keywords
+### **Sidebar en Streamlit:**
+- **Per page**: 50-200 (default 200)
+- **Max pages**: 1-5 (default 2)
+- **Top N revistas**: 5-20 (default 10)
+- **Keywords del abstract**: 5-20 (default 10)
+- **Modo de búsqueda**: Precisa (title+abstract) / Amplia (fulltext)
+- **Debug query**: Muestra construcción de query final
 
-**Proceso:**
-- Extrae keywords y bigrams relevantes del texto
+---
+
+## 🔬 Casos de Uso
+
+### **Escenario 1: Tesista buscando dónde publicar**
+1. Ingresa título y abstract de su tesis
+2. Sistema extrae keywords, busca en OpenAlex
+3. Recibe top 10 revistas con cuartiles SJR
+4. Explora detalles: impacto, frecuencia, publisher
+
+### **Escenario 2: Investigador escribiendo estado del arte**
+1. Busca por tema ("machine learning neural networks")
+2. Obtiene top 50 artículos más relevantes
+3. Filtra solo articles/reviews
+4. Accede a OpenAlex para leer abstracts
+
+### **Escenario 3: Grupo explorando alternativas de publicación**
+1. Tienen una revista de referencia (ISSN conocido)
+2. Buscan revistas similares por métricas
+3. Comparan cuartiles, impacto, productividad
+4. Descubren opciones en su nicho académico
+
+---
+
+## ⚠️ Limitaciones y Mejoras Futuras
+
+### **Limitaciones Actuales**
+- **Cobertura**: Depende de la completitud de OpenAlex (no todas las revistas tienen todos los metadatos)
+- **SJR**: Requiere carga manual de CSV actualizado (no hay API pública gratuita)
+- **Idioma**: Funciona mejor con queries en inglés (OpenAlex indexa principalmente en inglés)
+
+### **Mejoras Futuras**
+- 🔄 **Caché inteligente**: Evitar llamadas API duplicadas almacenando results en Redis
+- 📈 **Analytics dashboard**: Visualización de métricas de uso, queries populares, rendimiento
+- 🌍 **Soporte multiidioma**: Traducción automática de queries ES→EN con detección de idioma
+- 🤖 **Fine-tuning ranking**: Aprender pesos óptimos desde feedback de usuarios (ML supervisado)
+- 📊 **Exportación**: Generar reportes PDF/Excel con resultados y gráficos
+- 🔗 **Integración Scopus/WoS**: Enriquecer con métricas de otras fuentes (JCR, h-index)
+
+---
+
+## 📚 Stack Tecnológico
+
+| Tecnología | Versión | Uso |
+|------------|---------|-----|
+| **Python** | 3.8+ | Lenguaje principal |
+| **Streamlit** | 1.28+ | Framework UI interactivo |
+| **MySQL** | 8.0+ | Base de datos relacional |
+| **SQLAlchemy** | 2.x | ORM Python-MySQL |
+| **pandas** | Latest | Manipulación de datos |
+| **scikit-learn** | Latest | ML (coseno, normalización) |
+| **OpenAlex API** | v1 | Fuente de datos académicos |
+| **requests** | Latest | Cliente HTTP con retry |
+| **python-dotenv** | Latest | Manejo de variables de entorno |
+
+---
+
+## 🤝 Contribuciones
+
+Este es un proyecto de **bootcamp final de Data & IA**. Sugerencias y mejoras son bienvenidas:
+
+1. Fork el proyecto
+2. Crea una branch (`git checkout -b feature/mejora`)
+3. Commit cambios (`git commit -m 'Add: nueva feature'`)
+4. Push a branch (`git push origin feature/mejora`)
+5. Abre un Pull Request
+
+---
+
+## 📄 Licencia
+
+Este proyecto es de código abierto bajo licencia MIT. Ver archivo `LICENSE` para más detalles.
+
+---
+
+## 👨‍💻 Autor
+
+**José Luis** - Bootcamp Data & IA 2026
+
+📧 Contacto: [tu_email@ejemplo.com](mailto:tu_email@ejemplo.com)  
+🔗 LinkedIn: [tu-perfil](https://linkedin.com/in/tu-perfil)  
+🐙 GitHub: [@tu-usuario](https://github.com/tu-usuario)
+
+---
+
+## 🙏 Agradecimientos
+
+- **OpenAlex** por proporcionar datos académicos abiertos y de alta calidad
+- **SCImago** por métricas SJR de revistas científicas
+- **Streamlit** por facilitar la creación de interfaces interactivas
+- **Bootcamp instructores y compañeros** por feedback y apoyo durante el desarrollo
+
+---
+
+<div align="center">
+
+**⭐ Si te ha sido útil, considera dar una estrella al repo ⭐**
+
+</div>
+
 - Elimina stopwords (ES + EN) y términos genéricos
 - Si detecta "editorial board", ancla la búsqueda con comillas
 - Limita query a términos más relevantes (configurable 5-20 keywords de abstract)

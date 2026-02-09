@@ -28,4 +28,5 @@ MYSQL_CONNECTION_STRING = (
 # Configuración de la aplicación
 DEFAULT_PER_PAGE = 200
 DEFAULT_MAX_PAGES = 2
+TOP_SOURCES_LIMIT = 30  # Número máximo de sources a enriquecer con llamadas API completas
 TOP_N_RECOMMENDATIONS = 10

@@ -318,6 +318,17 @@ def main():
         top_n = st.slider("Top N recomendaciones", 5, 20, 10)
         abstract_keywords = st.slider("Keywords del abstract", 5, 20, 10, help="Número de keywords extraídas del abstract al construir la query")
         
+        # Modo de búsqueda en OpenAlex
+        st.subheader("🔍 Modo de Búsqueda")
+        search_mode_option = st.radio(
+            "Tipo de búsqueda en OpenAlex:",
+            options=["Precisa (título + abstract)", "Amplia (incluye fulltext)"],
+            index=0,
+            help="Precisa: busca solo en título y abstract (más relevante). Amplia: busca en todo el texto completo (más resultados pero menos precisos)."
+        )
+        # Mapear opción a valor interno
+        search_mode = "title_abstract" if "Precisa" in search_mode_option else "fulltext"
+        
         st.divider()
         
         # Debug opcional
@@ -343,14 +354,14 @@ def main():
     
     # ========== TAB 1: Búsqueda por Texto ==========
     with tab1:
-        search_by_text_tab(per_page, max_pages, top_n, debug_query, abstract_keywords)
+        search_by_text_tab(per_page, max_pages, top_n, debug_query, abstract_keywords, search_mode)
     
     # ========== TAB 2: Búsqueda por Revista ==========
     with tab2:
         search_by_journal_tab(top_n)
 
 
-def search_by_text_tab(per_page, max_pages, top_n, debug_query=False, abstract_keywords=10):
+def search_by_text_tab(per_page, max_pages, top_n, debug_query=False, abstract_keywords=10, search_mode="title_abstract"):
     """Tab para búsqueda por texto."""
     # Formulario de consulta
     st.header("🔍 Ingresa tu Consulta")
@@ -409,104 +420,137 @@ def search_by_text_tab(per_page, max_pages, top_n, debug_query=False, abstract_k
                 st.warning("⚠️ El abstract es muy corto. Añade un título o escribe un resumen más largo (≥ 50 caracteres).")
                 st.stop()
         
-        # Construir query final
-        final_query = query_text
+        # ========== CONSTRUIR final_query UNIFORME ==========
+        final_query = ""
+        title_uni, title_bi, abs_uni, abs_bi = [], [], [], []  # Variables para debug
         
-        # Variables para debug
-        title_uni, title_bi, abs_uni, abs_bi = [], [], [], []
+        # Keywords genéricas a filtrar
+        generic_keywords = {
+            'objective', 'study', 'results', 'using', 'approach', 'scale', 
+            'across', 'major', 'publishers', 'publisher', 'open', 'role', 
+            'roles', 'size', 'sustainability', 'ebook', 'ebooks', 'repository',
+            'repositories', 'dataset', 'datasets'
+        }
         
-        if not final_query:
-            # Si no hay query_text, construir desde title/abstract con keywords y bigrams
+        if query_text:
+            # CASO 1: Consulta libre
+            # Limpieza ligera: reemplazar guiones por espacios
+            cleaned = query_text.replace('-', ' ').strip()
+            
+            # Si es muy larga (>200 chars), extraer keywords; si no, usar tal cual
+            if len(cleaned) > 200:
+                # Extraer keywords para reducir
+                extracted_uni, extracted_bi = extract_keywords_and_bigrams(
+                    cleaned,
+                    top_unigrams=12,
+                    top_bigrams=4
+                )
+                extracted_uni = extracted_uni if extracted_uni else []
+                extracted_bi = extracted_bi if extracted_bi else []
+                
+                # Combinar, deduplicar y limitar
+                all_terms = extracted_bi + extracted_uni
+                # Deduplicar case-insensitive
+                seen = set()
+                unique = []
+                for t in all_terms:
+                    t_lower = t.lower() if t else ""
+                    if t and t_lower and t_lower not in seen:
+                        seen.add(t_lower)
+                        unique.append(t)
+                final_query = " ".join(unique[:18])
+            else:
+                final_query = cleaned
+        else:
+            # CASO 2: Construir desde title/abstract con keywords+bigrams
             all_terms = []
-            has_editorial_board = False
             
-            # Detectar si aparece "editorial board" en el texto original
-            combined_text = f"{title} {abstract}".lower()
-            if 'editorial board' in combined_text or 'editorial boards' in combined_text:
-                has_editorial_board = True
-            
+            # Extraer de título si existe
             if title:
-                # Extraer keywords y bigrams del título
+                # Limpiar guiones
+                title_clean = title.replace('-', ' ')
                 title_uni, title_bi = extract_keywords_and_bigrams(
-                    title, 
-                    top_unigrams=8, 
+                    title_clean,
+                    top_unigrams=10,
                     top_bigrams=3
                 )
-                # NULL-SAFE: Convertir None a listas vacías (redundante pero seguro)
-                title_uni = title_uni if title_uni is not None and isinstance(title_uni, list) else []
-                title_bi = title_bi if title_bi is not None and isinstance(title_bi, list) else []
-                
-                all_terms.extend(title_bi)   # Primero bigramas
-                all_terms.extend(title_uni)  # Luego unigramas
+                title_uni = title_uni if title_uni else []
+                title_bi = title_bi if title_bi else []
+                all_terms.extend(title_bi)
+                all_terms.extend(title_uni)
             
+            # Extraer de abstract si existe
             if abstract:
-                # Extraer keywords y bigrams del abstract
                 abs_uni, abs_bi = extract_keywords_and_bigrams(
-                    abstract, 
-                    top_unigrams=abstract_keywords, 
+                    abstract,
+                    top_unigrams=abstract_keywords,
                     top_bigrams=5
                 )
-                # NULL-SAFE: Convertir None a listas vacías (redundante pero seguro)
-                abs_uni = abs_uni if abs_uni is not None and isinstance(abs_uni, list) else []
-                abs_bi = abs_bi if abs_bi is not None and isinstance(abs_bi, list) else []
-                
-                all_terms.extend(abs_bi)   # Primero bigramas
-                all_terms.extend(abs_uni)  # Luego unigramas
+                abs_uni = abs_uni if abs_uni else []
+                abs_bi = abs_bi if abs_bi else []
+                all_terms.extend(abs_bi)
+                all_terms.extend(abs_uni)
             
-            # Eliminar keywords demasiado genéricas
-            generic_keywords = {
-                'objective', 'study', 'results', 'using', 'approach', 'scale', 
-                'across', 'major', 'publishers', 'publisher', 'open', 'role', 
-                'roles', 'size', 'sustainability', 'ebook', 'ebooks', 'repository',
-                'repositories', 'dataset', 'datasets'
-            }
+            # Filtrar keywords genéricas
+            filtered_terms = [
+                term for term in all_terms
+                if term and term.lower() not in generic_keywords
+            ]
             
-            # Normalizar "editorial boards" -> "editorial board" y filtrar genéricas
-            normalized_terms = []
-            for term in all_terms:
-                if term:  # Verificar que no sea None o vacío
-                    term_lower = term.lower()
-                    # Saltar keywords genéricas
-                    if term_lower in generic_keywords:
-                        continue
-                    # Saltar si es "editorial board" (se añadirá con comillas)
-                    if 'editorial board' in term_lower:
-                        continue
-                    # Normalizar plural
-                    if 'editorial boards' in term_lower:
-                        term = term_lower.replace('editorial boards', 'editorial board')
-                    normalized_terms.append(term)
-            
-            # Eliminar duplicados preservando el orden
+            # Deduplicar preservando orden (case-insensitive)
             seen = set()
             unique_terms = []
-            for term in normalized_terms:
-                if term and term not in seen:  # Verificar que term no sea None o vacío
-                    seen.add(term)
+            for term in filtered_terms:
+                term_lower = term.lower() if term else ""
+                if term and term_lower and term_lower not in seen:
+                    seen.add(term_lower)
                     unique_terms.append(term)
             
-            # Si se detectó "editorial board", construir query especial
-            if has_editorial_board:
-                # Añadir "editorial board" con comillas al inicio
-                # Limitar el resto a máximo 10 términos
-                final_query = '"editorial board" ' + " ".join(unique_terms[:10])
-            else:
-                # Query normal: máximo 25 tokens o 200 caracteres
-                final_query = " ".join(unique_terms[:25])
-            
-            # Limitar longitud total
-            if len(final_query) > 200:
-                # NULL-SAFE: Cortar en espacio, proteger si no hay espacios
-                parts = final_query[:200].rsplit(' ', 1)
-                final_query = parts[0] if parts else final_query[:200]
-            
-            # Fallback: si no se pudo construir query con keywords, usar texto original recortado
-            if not final_query:
-                if title:
-                    final_query = title[:200]
-                elif abstract:
-                    final_query = abstract[:200]
+            # Limitar a máximo 12-18 tokens para mejor precisión
+            final_query = " ".join(unique_terms[:18])
         
+        # Fallback si final_query quedó vacía
+        if not final_query:
+            if title:
+                final_query = title[:200]
+            elif abstract:
+                final_query = abstract[:200]
+        
+        # ========== LIMPIEZA FINAL DE QUERY ==========
+        if final_query:
+            # 1) Normalizar guiones a espacios
+            final_query = final_query.replace('-', ' ')
+            
+            # 2) Tokenizar y eliminar vacíos
+            tokens = [t.strip() for t in final_query.split() if t.strip()]
+            
+            # 3) Normalizar "editorial boards" -> "editorial board"
+            normalized_tokens = []
+            i = 0
+            while i < len(tokens):
+                if i < len(tokens) - 1:
+                    # Verificar bigrama
+                    if tokens[i].lower() == "editorial" and tokens[i+1].lower() == "boards":
+                        normalized_tokens.append(tokens[i])  # "editorial"
+                        normalized_tokens.append("board")    # "board" (sin s)
+                        i += 2
+                        continue
+                normalized_tokens.append(tokens[i])
+                i += 1
+            
+            # 4) Dedupe final (case-insensitive, preservando orden)
+            seen_final = set()
+            unique_final = []
+            for tok in normalized_tokens:
+                tok_lower = tok.lower()
+                if tok_lower not in seen_final:
+                    seen_final.add(tok_lower)
+                    unique_final.append(tok)
+            
+            # 5) Limitar a 15 tokens máximo
+            final_query = " ".join(unique_final[:15])
+        
+        # Validación final
         if not final_query:
             st.warning("⚠️ Por favor ingresa al menos un texto de búsqueda")
         else:
@@ -528,12 +572,17 @@ def search_by_text_tab(per_page, max_pages, top_n, debug_query=False, abstract_k
             
             with st.spinner("🔄 Buscando en OpenAlex y calculando recomendaciones..."):
                 try:
-                    # Pipeline ETL + ML (ahora devuelve tupla)
-                    df_candidates, df_works = load_works_and_sources(
+                    # Pipeline ETL + ML (ahora devuelve tupla de 3: candidatos, works, did_fallback)
+                    df_candidates, df_works, did_fallback = load_works_and_sources(
                         final_query,
                         per_page=per_page,
-                        max_pages=max_pages
+                        max_pages=max_pages,
+                        search_mode=search_mode
                     )
+                    
+                    # Mostrar mensaje si se activó fallback automático
+                    if did_fallback:
+                        st.info("ℹ️ 0 resultados en modo preciso; se amplió la búsqueda automáticamente.")
                     
                     if df_candidates.empty:
                         st.warning("⚠️ No se encontraron resultados para esta búsqueda")
@@ -761,26 +810,33 @@ def search_by_text_tab(per_page, max_pages, top_n, debug_query=False, abstract_k
                         ~df_works_filtered['title'].str.lower().str.startswith(prefix, na=False)
                     ]
             
-            # Ordenar por citas (desc) y luego año (desc)
-            df_works_filtered = df_works_filtered.sort_values(
-                by=['cited_by_count', 'publication_year'],
-                ascending=[False, False]
-            )
+            # NO re-ordenar aquí: df_works ya viene ordenado por relevancia desde load_openalex.py
+            # (score mixto en modo fulltext, relevance_score en modo preciso, citas como fallback)
             
             # Mostrar explicación del filtrado
-            st.caption("ℹ️ Filtrado para excluir paratext/editorials. Ordenados por citas (desc) y año (desc).")
+            has_relevance = 'relevance_score' in df_works_filtered.columns
+            if has_relevance:
+                st.caption("ℹ️ Artículos ordenados por relevancia (OpenAlex relevance_score) con desempate por citas.")
+            else:
+                st.caption("ℹ️ Artículos ordenados por número de citas (descendente).")
             
             # Preparar DataFrame para visualización
-            columns_to_show = ['title', 'publication_year', 'cited_by_count', 'source_name']
+            columns_to_show = ['title', 'publication_year']
+            if has_relevance:
+                columns_to_show.append('relevance_score')
+            columns_to_show.extend(['cited_by_count', 'source_name'])
             if 'type' in df_works_filtered.columns:
                 columns_to_show.append('type')
             
+            # Filtrar solo columnas que existan
+            columns_to_show = [col for col in columns_to_show if col in df_works_filtered.columns]
             df_works_show = df_works_filtered[columns_to_show].copy()
             
             # Renombrar columnas
             column_names = {
                 'title': 'Título',
                 'publication_year': 'Año',
+                'relevance_score': 'Relevancia',
                 'cited_by_count': 'Citas',
                 'source_name': 'Revista',
                 'type': 'Tipo'
@@ -788,6 +844,8 @@ def search_by_text_tab(per_page, max_pages, top_n, debug_query=False, abstract_k
             df_works_show.columns = [column_names.get(col, col) for col in df_works_show.columns]
             
             # Formatear
+            if 'Relevancia' in df_works_show.columns:
+                df_works_show['Relevancia'] = df_works_show['Relevancia'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
             df_works_show['Citas'] = df_works_show['Citas'].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
             df_works_show['Año'] = df_works_show['Año'].apply(lambda x: str(int(x)) if pd.notna(x) else "N/A")
             df_works_show['Revista'] = df_works_show['Revista'].fillna('N/A')
