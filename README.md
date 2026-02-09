@@ -269,7 +269,7 @@ TOP_SOURCES_LIMIT = 30        # Top sources a enriquecer con API (optimización)
 
 ## 🤝 Contribuciones
 
-Este es un proyecto de **bootcamp final de Data & IA**. Sugerencias y mejoras son bienvenidas:
+Este es un proyecto de **bootcamp de Data & IA de Upgrade Hub**. Sugerencias y mejoras son bienvenidas:
 
 1. Fork el proyecto
 2. Crea una branch (`git checkout -b feature/mejora`)
@@ -281,17 +281,15 @@ Este es un proyecto de **bootcamp final de Data & IA**. Sugerencias y mejoras so
 
 ## 📄 Licencia
 
-Este proyecto es de código abierto bajo licencia MIT. Ver archivo `LICENSE` para más detalles.
+Este proyecto es de código abierto bajo licencia CC0.
 
 ---
 
 ## 👨‍💻 Autor
 
-**José Luis** - Bootcamp Data & IA 2026
+**E. Becerra Rodero** - Bootcamp Data & IA 2026
 
-📧 Contacto: [tu_email@ejemplo.com](mailto:tu_email@ejemplo.com)  
-🔗 LinkedIn: [tu-perfil](https://linkedin.com/in/tu-perfil)  
-🐙 GitHub: [@tu-usuario](https://github.com/tu-usuario)
+🐙 GitHub: [@evi567](https://github.com/evi567)
 
 ---
 
