@@ -38,21 +38,29 @@ def calculate_scores(df_candidates):
     # Obtener engine para consultas a MySQL
     engine = get_engine()
     
-    # Enriquecer con datos de MySQL
+    # Enriquecer con datos de MySQL (incluye LEFT JOIN con SJR)
     source_ids = df_candidates['source_id'].tolist()
     source_ids_str = "','".join(source_ids)
     
     query = f"""
     SELECT 
-        source_id,
-        display_name,
-        works_count,
-        cited_by_count,
-        type,
-        publisher,
-        country_code
-    FROM sources
-    WHERE source_id IN ('{source_ids_str}')
+        s.source_id,
+        s.display_name,
+        s.works_count,
+        s.cited_by_count,
+        s.two_yr_mean_citedness,
+        s.works_ref_year,
+        s.cites_ref_year,
+        s.type,
+        s.publisher,
+        s.country_code,
+        s.issn_l,
+        sjr.quartile,
+        sjr.sjr
+    FROM sources s
+    LEFT JOIN sjr_2024 sjr
+        ON REPLACE(s.issn_l, '-', '') = sjr.issn_norm
+    WHERE s.source_id IN ('{source_ids_str}')
     """
     
     df_sources = pd.read_sql(query, engine)
@@ -63,6 +71,9 @@ def calculate_scores(df_candidates):
     # Rellenar NaN y manejar display_name correctamente
     df['works_count'] = df['works_count'].fillna(0)
     df['cited_by_count'] = df['cited_by_count'].fillna(0)
+    df['two_yr_mean_citedness'] = df['two_yr_mean_citedness'].fillna(0)
+    df['works_ref_year'] = df['works_ref_year'].fillna(0)
+    df['cites_ref_year'] = df['cites_ref_year'].fillna(0)
     
     # Asegurar display_name: priorizar el de MySQL (sin sufijo), luego el original
     if 'display_name' not in df.columns:
@@ -79,22 +90,24 @@ def calculate_scores(df_candidates):
     max_freq = df['freq'].max()
     df['freq_norm'] = df['freq'] / max_freq if max_freq > 0 else 0
     
-    # Componentes del score
-    df['cited_score'] = np.log1p(df['cited_by_count'])  # log(x+1)
-    df['works_score'] = np.log1p(df['works_count'])
+    # Normalizar two_yr_mean_citedness
+    max_two_yr = df['two_yr_mean_citedness'].max()
+    df['two_yr_norm'] = df['two_yr_mean_citedness'] / max_two_yr if max_two_yr > 0 else 0
     
-    # Normalizar componentes logarítmicos
-    max_cited = df['cited_score'].max()
-    max_works = df['works_score'].max()
+    # Normalizar works_ref_year
+    max_works_ref = df['works_ref_year'].max()
+    df['works_ref_norm'] = df['works_ref_year'] / max_works_ref if max_works_ref > 0 else 0
     
-    df['cited_norm'] = df['cited_score'] / max_cited if max_cited > 0 else 0
-    df['works_norm'] = df['works_score'] / max_works if max_works > 0 else 0
+    # Normalizar cites_ref_year
+    max_cites_ref = df['cites_ref_year'].max()
+    df['cites_ref_norm'] = df['cites_ref_year'] / max_cites_ref if max_cites_ref > 0 else 0
     
-    # Score final
+    # Score final (nueva fórmula: incluye citas del año de referencia)
     df['score'] = (
-        0.6 * df['freq_norm'] +
-        0.2 * df['cited_norm'] +
-        0.2 * df['works_norm']
+        0.75 * df['freq_norm'] +
+        0.15 * df['two_yr_norm'] +
+        0.05 * df['works_ref_norm'] +
+        0.05 * df['cites_ref_norm']
     )
     
     # Generar explicación 'why'
@@ -107,7 +120,9 @@ def calculate_scores(df_candidates):
     # Limpiar columnas intermedias
     columns_to_keep = [
         'rank_position', 'source_id', 'display_name', 'score', 'why',
-        'freq', 'works_count', 'cited_by_count', 'type', 'publisher', 'country_code'
+        'freq', 'works_count', 'cited_by_count', 'two_yr_mean_citedness',
+        'works_ref_year', 'cites_ref_year', 'type', 'publisher', 'country_code',
+        'quartile', 'sjr', 'issn_l'
     ]
     df = df[[col for col in columns_to_keep if col in df.columns]]
     
@@ -122,43 +137,35 @@ def calculate_scores(df_candidates):
 def generate_explanation(row):
     """
     Genera una explicación breve del por qué de la recomendación.
+    Muestra cuántas veces aparece la revista en los resultados y actividad reciente.
     
     Args:
         row (pd.Series): Fila del DataFrame con datos de una revista
         
     Returns:
-        str: Texto explicativo
+        str: Texto explicativo con frecuencia y métricas clave
     """
-    parts = []
+    freq = int(row.get("freq", 0) or 0)
+    works_ref = int(row.get("works_ref_year", 0) or 0)
+    cites_ref = int(row.get("cites_ref_year", 0) or 0)
     
-    # Frecuencia
-    freq = int(row.get('freq', 0))
-    if freq > 0:
-        parts.append(f"Aparece {freq}x en resultados")
+    # Parte principal: frecuencia
+    if freq == 1:
+        base_text = "Aparece 1 vez en los resultados"
+    else:
+        base_text = f"Aparece {freq} veces en los resultados"
     
-    # Citas
-    cited = int(row.get('cited_by_count', 0))
-    if cited > 10000:
-        parts.append(f"{cited:,} citas totales")
-    elif cited > 1000:
-        parts.append(f"{cited:,} citas")
+    # Añadir actividad reciente si hay datos
+    activity_parts = []
+    if works_ref > 0:
+        activity_parts.append(f"{works_ref} trabajos (año ref)")
+    if cites_ref > 0:
+        activity_parts.append(f"{cites_ref} citas (año ref)")
     
-    # Trabajos publicados
-    works = int(row.get('works_count', 0))
-    if works > 10000:
-        parts.append(f"{works:,} trabajos publicados")
-    elif works > 1000:
-        parts.append(f"{works:,} trabajos")
-    
-    # Tipo
-    journal_type = row.get('type', '')
-    if journal_type and journal_type != 'journal':
-        parts.append(f"Tipo: {journal_type}")
-    
-    if not parts:
-        return "Revista relevante para tu búsqueda"
-    
-    return " | ".join(parts[:3])  # Máximo 3 elementos
+    if activity_parts:
+        return f"{base_text} | {', '.join(activity_parts)}"
+    else:
+        return base_text
 
 
 def get_top_recommendations(df_ranked, top_n=10):

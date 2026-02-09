@@ -27,10 +27,12 @@ CREATE TABLE IF NOT EXISTS works_sample (
     cited_by_count INT DEFAULT 0,
     source_id VARCHAR(255),
     source_name VARCHAR(500),
+    type VARCHAR(50),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (source_id) REFERENCES sources(source_id) ON DELETE SET NULL,
     INDEX idx_source_id (source_id),
-    INDEX idx_publication_year (publication_year)
+    INDEX idx_publication_year (publication_year),
+    INDEX idx_type (type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Tabla de consultas realizadas (query_runs)
